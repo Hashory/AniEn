@@ -1,0 +1,23 @@
+[project]
+name = "anien"
+version = "0.1.0"
+description = "A prototype video editing application."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.9.7",
+]
+
+[tool.ruff]
+line-length = 119
+
+[tool.ruff.lint]
+extend-select = ["I", "N"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "tab"
+line-ending = "auto"
