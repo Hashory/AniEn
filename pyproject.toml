@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "A prototype video editing application."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy>=2.2.3",
+    "openimageio>=3.0.3.1",
+]
 
 [tool.uv]
 dev-dependencies = [
