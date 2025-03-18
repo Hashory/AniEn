@@ -37,5 +37,9 @@ def main():
 	out_img.close()
 
 
+def openfx():
+	pass
+
+
 if __name__ == "__main__":
 	main()
