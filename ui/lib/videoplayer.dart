@@ -6,7 +6,7 @@ class VideoPlayerSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Colors.black87,
+      color: Theme.of(context).colorScheme.surface,
       child: Center(
         child: Text(
           'Video Player (Sample)',

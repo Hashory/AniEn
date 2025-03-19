@@ -26,7 +26,7 @@ class _TimelineSectionState extends State<TimelineSection> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Colors.blueGrey[900],
+      color: Theme.of(context).colorScheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

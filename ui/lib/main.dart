@@ -29,14 +29,13 @@ class AniEnRoot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final outlineColor = Theme.of(context).colorScheme.outlineVariant;
-
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
       body: MultiSplitViewTheme(
         data: MultiSplitViewThemeData(
           dividerPainter: DividerPainters.grooved1(
-            color: outlineColor,
-            highlightedColor: outlineColor,
+            color: Theme.of(context).colorScheme.outlineVariant,
+            highlightedColor: Theme.of(context).colorScheme.outlineVariant,
           ),
         ),
         child: MultiSplitView(

@@ -14,7 +14,7 @@ class _NodeSectionState extends State<NodeSection> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Colors.grey[850],
+      color: Theme.of(context).colorScheme.surface,
       padding: const EdgeInsets.all(8.0),
       child: Column(
         children: [
