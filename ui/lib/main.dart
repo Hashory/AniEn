@@ -4,6 +4,7 @@ import 'theme.dart';
 import 'timeline.dart';
 import 'videoplayer.dart';
 import 'node.dart';
+import 'timeline_structure_json.dart';
 
 void main() {
   runApp(const AniEnUI());
@@ -50,7 +51,11 @@ class AniEnRoot extends StatelessWidget {
                     ],
                   ),
             ),
-            Area(builder: (context, area) => TimelineSection()),
+            Area(
+              builder:
+                  (context, area) =>
+                      TimelineSection(timelineData: timelineStructureJson()),
+            ),
           ],
         ),
       ),
