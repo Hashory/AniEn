@@ -1,8 +1,17 @@
 import json
 import os
+import uuid
 
+import numpy as np
 import opengl_image_process_util as oip
 import OpenImageIO
+from aiohttp import web
+from aiortc import (
+	RTCPeerConnection,
+	RTCSessionDescription,
+	VideoStreamTrack,
+)
+from av import VideoFrame
 
 
 def load_image(filename):
@@ -85,7 +94,123 @@ def image_process(timeline, frame_number, asset_folder="assets"):
 	return result_pixels, spec
 
 
+pcs = set()  # Set of active PeerConnections
+
+
+class ServerVideoTrack(VideoStreamTrack):
+	"""
+	Server video track for streaming frames to clients
+	"""
+
+	def __init__(self):
+		super().__init__()  # Initialize parent class
+		self.counter = 0  # Frame counter
+
+	async def recv(self):
+		# Get next timestamp
+		pts, time_base = await self.next_timestamp()
+
+		try:
+			# Generate a color frame - in a real app, this could pull from your rendering system
+			img = np.zeros((480, 640, 3), dtype=np.uint8)
+			color = ((self.counter * 5) % 255, (self.counter * 3) % 255, (self.counter * 7) % 255)
+			img = np.full((480, 640, 3), color, dtype=np.uint8)
+			self.counter += 1
+
+			# Create a video frame from the numpy array
+			frame = VideoFrame.from_ndarray(img, format="bgr24")
+			frame.pts = pts
+			frame.time_base = time_base
+			return frame
+		except Exception as e:
+			print(f"Error generating video frame: {e}")
+			# Return a black frame in case of error
+			img = np.zeros((480, 640, 3), dtype=np.uint8)
+			frame = VideoFrame.from_ndarray(img, format="bgr24")
+			frame.pts = pts
+			frame.time_base = time_base
+			return frame
+
+
+async def offer(request):
+	"""
+	Handle WebRTC offer from client and return an answer
+	"""
+	try:
+		params = await request.json()
+		offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+		# Create a new peer connection
+		pc = RTCPeerConnection()
+		pc_id = f"PeerConnection({uuid.uuid4()})"
+		pcs.add(pc)
+		print(f"{pc_id} created for {request.remote}")
+
+		# Process the offer and set remote description
+		await pc.setRemoteDescription(offer)
+
+		@pc.on("connectionstatechange")
+		async def on_connectionstatechange():
+			print(f"{pc_id} Connection state is {pc.connectionState}")
+			if pc.connectionState == "failed" or pc.connectionState == "closed":
+				await pc.close()
+				pcs.discard(pc)
+
+		@pc.on("iceconnectionstatechange")
+		async def on_iceconnectionstatechange():
+			print(f"{pc_id} ICE Connection state is {pc.iceConnectionState}")
+
+		@pc.on("icegatheringstatechange")
+		async def on_icegatheringstatechange():
+			print(f"{pc_id} ICE Gathering state is {pc.iceGatheringState}")
+
+		# Add the video track from server to the peer connection
+		video_track = ServerVideoTrack()
+		pc.addTrack(video_track)
+
+		# Create an answer
+		answer = await pc.createAnswer()
+
+		# Set local description
+		await pc.setLocalDescription(answer)
+
+		# Return the answer with the gathered ICE candidates
+		return web.Response(
+			content_type="application/json",
+			text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
+		)
+
+	except Exception as e:
+		print(f"Error handling offer: {e}")
+		return web.Response(status=500, text=str(e))
+
+
+async def on_shutdown(app):
+	"""Close all peer connections when server shuts down"""
+	print("Shutting down WebRTC connections")
+	coros = [pc.close() for pc in pcs]
+	await web.asyncio.gather(*coros)
+	pcs.clear()
+
+
 def main():
+	# -----------
+	# For WebRTC
+	# -----------
+	app = web.Application()
+	app.router.add_post("/offer", offer)
+
+	# Register shutdown handler
+	app.on_shutdown.append(on_shutdown)
+
+	# Run the server
+	print("Starting WebRTC server at http://localhost:41395")
+	web.run_app(app=app, host="localhost", port=41395)
+
+	# ---------------------
+	# For image processing
+	# ---------------------
+
 	input_frame_number = 22
 	project_filename = "assets/project.json"
 	output_filename = f"outputs/frame_{input_frame_number:04d}.png"

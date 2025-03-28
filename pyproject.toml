@@ -5,6 +5,8 @@ description = "A prototype video editing application."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiohttp>=3.11.14",
+    "aiortc>=1.10.1",
     "numpy>=2.2.3",
     "opengl-image-process-util",
     "openimageio>=3.0.3.1",
