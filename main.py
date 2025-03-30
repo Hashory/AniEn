@@ -1,125 +1,75 @@
+import asyncio
+import fractions
 import json
 import os
+import time
 import uuid
+from typing import Tuple
 
 import numpy as np
-import opengl_image_process_util as oip
 import OpenImageIO
 from aiohttp import web
 from aiohttp_middlewares import cors_middleware
 from aiortc import (
+	MediaStreamTrack,
 	RTCPeerConnection,
 	RTCSessionDescription,
-	VideoStreamTrack,
 )
 from av import VideoFrame
 
-
-def load_image(filename):
-	"""Load an image and return its pixel data and specifications"""
-	in_img = OpenImageIO.ImageInput.open(filename)
-	if not in_img:
-		print(f"Error: Could not open input image: {filename}")
-		return None, None
-
-	spec = in_img.spec()
-	width = spec.width
-	height = spec.height
-	nchannels = spec.nchannels
-	pixel_data = in_img.read_image()
-	in_img.close()
-
-	return pixel_data, spec
-
-
-def get_visible_clips_at_frame(timeline, frame_number, asset_folder="assets"):
-	"""Recursively search timeline to find all clips visible at the given frame"""
-	visible_clips = []
-
-	if timeline.get("role") == "folder":
-		tracks = timeline.get("tracks", [])
-		start_offset = timeline.get("start", 0)
-
-		for track in tracks:
-			clips = track.get("clips", [])
-			for clip in clips:
-				if clip.get("role") == "folder":
-					# Recursively search folders
-					nested_start = clip.get("start", 0) + start_offset
-					nested_timeline = {"role": "folder", "start": nested_start, "tracks": clip.get("tracks", [])}
-					visible_clips.extend(get_visible_clips_at_frame(nested_timeline, frame_number, asset_folder))
-				elif clip.get("role") == "clip":
-					# Check if this clip is visible at the current frame
-					clip_start = clip.get("start", 0) + start_offset
-					clip_length = clip.get("length", 0)
-					clip_end = clip_start + clip_length
-
-					if clip_start <= frame_number < clip_end:
-						source = clip.get("source", "")
-						if source:
-							visible_clips.append(os.path.join(asset_folder, source))
-
-	return visible_clips
-
-
-def image_process(timeline, frame_number, asset_folder="assets"):
-	"""Process the timeline and return the rendered frame image for the specified frame number"""
-	# Find all clips visible at the specified frame
-	visible_clip_paths = get_visible_clips_at_frame(timeline, frame_number, asset_folder)
-
-	if not visible_clip_paths:
-		print(f"No clips found for frame {frame_number}")
-		return None, None
-
-	print(f"Found {len(visible_clip_paths)} visible clips at frame {frame_number}:")
-	for path in visible_clip_paths:
-		print(f"  - {path}")
-
-	# Load the first image to get dimensions
-	first_image_path = visible_clip_paths[0]
-	result_pixels, spec = load_image(first_image_path)
-
-	if result_pixels is None:
-		print(f"Failed to load first image: {first_image_path}")
-		return None, None
-
-	# Blend all subsequent images
-	for image_path in visible_clip_paths[1:]:
-		image_pixels, _ = load_image(image_path)
-		if image_pixels is not None:
-			# Blend the current result with the new image
-			result_pixels = oip.overlay_images(result_pixels, image_pixels)
-		else:
-			print(f"Failed to load image: {image_path}")
-
-	return result_pixels, spec
-
+from image_process import image_process
 
 pcs = set()  # Set of active PeerConnections
+project_data = None  # Placeholder for the project data object
 
 
-class ServerVideoTrack(VideoStreamTrack):
+VIDEO_CLOCK_RATE = 90000
+VIDEO_PTIME = 1 / 3  # 3fps
+VIDEO_TIME_BASE = fractions.Fraction(1, VIDEO_CLOCK_RATE)
+
+
+class ServerVideoTrack(MediaStreamTrack):
 	"""
 	Server video track for streaming frames to clients
 	"""
 
-	def __init__(self):
+	kind = "video"
+
+	_start: float
+	_timestamp: int
+
+	def __init__(self, timeline):
 		super().__init__()  # Initialize parent class
-		self.counter = 0  # Frame counter
+		self.timeline = timeline
+		self.frame_index = 22  # Default frame index
+
+	async def next_timestamp(self) -> Tuple[int, fractions.Fraction]:
+		if self.readyState != "live":
+			raise Exception("Track is not live")
+
+		if hasattr(self, "_timestamp"):
+			self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
+			wait = self._start + (self._timestamp / VIDEO_CLOCK_RATE) - time.time()
+			await asyncio.sleep(wait)
+		else:
+			self._start = time.time()
+			self._timestamp = 0
+		return self._timestamp, VIDEO_TIME_BASE
 
 	async def recv(self):
 		# Get next timestamp
 		pts, time_base = await self.next_timestamp()
 
 		try:
-			# Generate a color frame - in a real app, this could pull from your rendering system
-			img = np.zeros((480, 640, 3), dtype=np.uint8)
-			color = ((self.counter * 5) % 255, (self.counter * 3) % 255, (self.counter * 7) % 255)
-			img = np.full((480, 640, 3), color, dtype=np.uint8)
-			self.counter += 1
+			result_pixels, spec = image_process(self.timeline, self.frame_index)
+
+			# Convert form float32 RGBA to uint8 BGR
+			result_pixels = (np.clip(result_pixels, 0, 1) * 255).astype(np.uint8)
+			result_pixels = result_pixels[:, :, :3]  # Drop the alpha channel
+			result_pixels = result_pixels[:, :, ::-1]  # Convert RGBA to BGR
 
 			# Create a video frame from the numpy array
-			frame = VideoFrame.from_ndarray(img, format="bgr24")
+			frame = VideoFrame.from_ndarray(result_pixels, format="bgr24")
 			frame.pts = pts
 			frame.time_base = time_base
 			return frame
@@ -166,8 +116,21 @@ async def offer(request):
 			print(f"{pc_id} ICE Gathering state is {pc.iceGatheringState}")
 
 		# Add the video track from server to the peer connection
-		video_track = ServerVideoTrack()
+		timeline = project_data.get("timeline", {})
+		video_track = ServerVideoTrack(timeline=timeline)
 		pc.addTrack(video_track)
+
+		@pc.on("datachannel")
+		async def on_datachannel(channel):
+			@channel.on("message")
+			def on_message(message):
+				if isinstance(message, str):
+					print(f"Message from {pc_id}: {message}")
+					try:
+						frame_number = int(message)
+						video_track.frame_index = frame_number
+					except ValueError:
+						print(f"Invalid frame index: {message}")
 
 		# Create an answer
 		answer = await pc.createAnswer()
@@ -195,6 +158,27 @@ async def on_shutdown(app):
 
 
 def main():
+	# ---------
+	# For project
+	# ---------
+
+	global project_data
+
+	input_frame_number = 22
+	project_filename = "assets/project.json"
+	output_filename = f"outputs/frame_{input_frame_number:04d}.png"
+
+	# Create outputs directory if it doesn't exist
+	os.makedirs("outputs", exist_ok=True)
+
+	# Load the project file
+	try:
+		with open(project_filename, "r") as f:
+			project_data = json.load(f)
+	except Exception as e:
+		print(f"Error loading project file: {e}")
+		return
+
 	# -----------
 	# For WebRTC
 	# -----------
@@ -219,21 +203,6 @@ def main():
 	# ---------------------
 	# For image processing
 	# ---------------------
-
-	input_frame_number = 22
-	project_filename = "assets/project.json"
-	output_filename = f"outputs/frame_{input_frame_number:04d}.png"
-
-	# Create outputs directory if it doesn't exist
-	os.makedirs("outputs", exist_ok=True)
-
-	# Load the project file
-	try:
-		with open(project_filename, "r") as f:
-			project_data = json.load(f)
-	except Exception as e:
-		print(f"Error loading project file: {e}")
-		return
 
 	# Get the timeline from the project
 	timeline = project_data.get("timeline", {})

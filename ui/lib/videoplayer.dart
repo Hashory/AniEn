@@ -16,11 +16,13 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
   bool _connected = false;
   bool _connecting = false;
   String _statusMessage = 'Tap Connect to start';
+  double _currentFrame = 22; // Default frame index
 
   // WebRTC objects
   final _renderer = RTCVideoRenderer();
   RTCPeerConnection? _peerConnection;
   MediaStream? _stream;
+  RTCDataChannel? _dataChannel;
 
   // Server endpoint
   final _serverUrl = 'http://localhost:41395';
@@ -29,6 +31,15 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
   void initState() {
     super.initState();
     _renderer.initialize();
+  }
+
+  void _sendFrameIndex(int frameIndex) {
+    if (_dataChannel?.state == RTCDataChannelState.RTCDataChannelOpen) {
+      _dataChannel!.send(RTCDataChannelMessage(frameIndex.toString()));
+      print('Sent frame index: $frameIndex');
+    } else {
+      print('Data channel not open, frame index not sent');
+    }
   }
 
   Future<void> _connect() async {
@@ -48,6 +59,20 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
         ],
         'sdpSemantics': 'unified-plan',
       });
+
+      // Create data channel for frame index
+      _dataChannel = await _peerConnection!.createDataChannel(
+        'frames',
+        RTCDataChannelInit()..ordered = true,
+      );
+
+      _dataChannel!.onDataChannelState = (RTCDataChannelState state) {
+        print('Data channel state: $state');
+        if (state == RTCDataChannelState.RTCDataChannelOpen) {
+          // Send initial frame index
+          _sendFrameIndex(_currentFrame.toInt());
+        }
+      };
 
       final iceGatheringStateComplete = Completer<void>();
 
@@ -146,6 +171,7 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
   @override
   void dispose() {
     _renderer.dispose();
+    _dataChannel?.close();
     _peerConnection?.close();
     _stream?.dispose();
     super.dispose();
@@ -153,33 +179,82 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: Colors.black,
-      child:
-          _connected && _stream != null
-              ? RTCVideoView(
-                _renderer,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-              )
-              : Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      _statusMessage,
-                      style: const TextStyle(color: Colors.white, fontSize: 18),
-                      textAlign: TextAlign.center,
+    return Column(
+      children: [
+        Expanded(
+          child: Container(
+            color: Colors.black,
+            child:
+                _connected && _stream != null
+                    ? RTCVideoView(
+                      _renderer,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                    )
+                    : Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            _statusMessage,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 20),
+                          _connecting
+                              ? const CircularProgressIndicator(
+                                color: Colors.white,
+                              )
+                              : ElevatedButton(
+                                onPressed: _connect,
+                                child: const Text('Connect'),
+                              ),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 20),
-                    _connecting
-                        ? const CircularProgressIndicator(color: Colors.white)
-                        : ElevatedButton(
-                          onPressed: _connect,
-                          child: const Text('Connect'),
-                        ),
+          ),
+        ),
+        if (_connected)
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16.0,
+              vertical: 8.0,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Frame: ${_currentFrame.toInt()}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Row(
+                  children: [
+                    const Text('0'),
+                    Expanded(
+                      child: Slider(
+                        value: _currentFrame,
+                        min: 0,
+                        max: 72,
+                        divisions: 72,
+                        label: _currentFrame.toInt().toString(),
+                        onChanged: (value) {
+                          setState(() {
+                            _currentFrame = value;
+                          });
+                          _sendFrameIndex(value.toInt());
+                        },
+                      ),
+                    ),
+                    const Text('72'),
                   ],
                 ),
-              ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
