@@ -6,6 +6,7 @@ import numpy as np
 import opengl_image_process_util as oip
 import OpenImageIO
 from aiohttp import web
+from aiohttp_middlewares import cors_middleware
 from aiortc import (
 	RTCPeerConnection,
 	RTCSessionDescription,
@@ -197,7 +198,15 @@ def main():
 	# -----------
 	# For WebRTC
 	# -----------
-	app = web.Application()
+	app = web.Application(
+		middlewares=[
+			cors_middleware(
+				allow_all=True,
+				allow_headers="*",
+				allow_methods="*",
+			)
+		]
+	)
 	app.router.add_post("/offer", offer)
 
 	# Register shutdown handler

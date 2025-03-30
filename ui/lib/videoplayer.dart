@@ -5,7 +5,7 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 
 class VideoPlayerSection extends StatefulWidget {
-  const VideoPlayerSection({super.key});
+  const VideoPlayerSection({Key? key}) : super(key: key);
 
   @override
   State<VideoPlayerSection> createState() => _VideoPlayerSectionState();
@@ -40,15 +40,18 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
     });
 
     try {
-      // Create peer connection
+      // Create PeerConnection
       _peerConnection = await createPeerConnection({
         'iceServers': [
-          {'urls': 'stun:stun.l.google.com:19302'},
+          // {'urls': 'stun:stun1.l.google.com:19302'},
+          // {'urls': 'stun:stun2.l.google.com:19302'},
         ],
         'sdpSemantics': 'unified-plan',
       });
 
-      // Set up track event handler
+      final iceGatheringStateComplete = Completer<void>();
+
+      // Display received video stream in onTrack event
       _peerConnection!.onTrack = (event) {
         if (event.streams.isNotEmpty) {
           setState(() {
@@ -59,7 +62,7 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
         }
       };
 
-      // Set up connection state handler
+      // Handle ICE Connection State disconnections
       _peerConnection!.onIceConnectionState = (state) {
         if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
             state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
@@ -70,21 +73,58 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
         }
       };
 
-      // Create and send offer
+      // Handle ICE Gathering State
+      _peerConnection!.onIceGatheringState = (state) {
+        print('ICE Gathering State: $state');
+
+        if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+          print('ICE Gathering Complete');
+          iceGatheringStateComplete.complete();
+        }
+      };
+
+      // Handle ICE candidates
+      _peerConnection!.onIceCandidate = (candidate) {
+        print('ICE Candidate: ${candidate.candidate}');
+      };
+
+      // Create an offer and set it as the local description
       final offer = await _peerConnection!.createOffer({
         'offerToReceiveVideo': true,
+        'offerToReceiveAudio': false,
       });
       await _peerConnection!.setLocalDescription(offer);
+      print('Local SDP: ${offer.sdp}');
 
-      // await _waitForIceGatheringComplete();
+      print(
+        'Local SDP:\n${(await _peerConnection!.getLocalDescription())?.sdp}',
+      );
+
+      // Wait for all ICE candidates to be gathered (completed via onIceCandidate)
+      // Note: The availability of empty candidates may be platform-dependent,
+      // so consider implementing a timeout mechanism if needed
+      await iceGatheringStateComplete.future;
+
+      print('All ICE candidates gathered');
+
+      print(
+        'Local SDP:\n${(await _peerConnection!.getLocalDescription())?.sdp}',
+      );
+
+      // Once all candidates are included in the LocalDescription, get the final SDP and send it to the server
+      final localDesc = await _peerConnection!.getLocalDescription();
+      if (localDesc == null) {
+        throw Exception('Failed to get localDescription');
+      }
 
       final response = await http.post(
         Uri.parse('$_serverUrl/offer'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'sdp': offer.sdp, 'type': offer.type}),
+        body: jsonEncode({'sdp': localDesc.sdp, 'type': localDesc.type}),
       );
 
       if (response.statusCode == 200) {
+        // Set the response (Answer) from the server
         final answer = jsonDecode(response.body);
         await _peerConnection!.setRemoteDescription(
           RTCSessionDescription(answer['sdp'], answer['type']),
@@ -101,36 +141,6 @@ class _VideoPlayerSectionState extends State<VideoPlayerSection> {
         _connecting = false;
       });
     }
-  }
-
-  Future<void> _waitForIceGatheringComplete() async {
-    // // if the connection is already complete, return
-    // if (_peerConnection!.iceGatheringState ==
-    //     RTCIceGatheringState.RTCIceGatheringStateComplete) {
-    //   return;
-    // }
-    // // Wait for completion using Completer
-    final completer = Completer<void>();
-    // print(_peerConnection!.iceGatheringState);
-    // _peerConnection!.onIceGatheringState = (state) {
-    //   print(state);
-    //   if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-    //     completer.complete();
-    //   }
-    // };
-
-    _peerConnection!.onIceCandidate = (RTCIceCandidate? candidate) async {
-      if (candidate == null) {
-        completer.complete();
-        return;
-      }
-
-      print('New ICE candidate: ${candidate.toString()}');
-
-      await _peerConnection!.addCandidate(candidate!);
-    };
-
-    await completer.future;
   }
 
   @override
