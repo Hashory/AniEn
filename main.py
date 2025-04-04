@@ -1,97 +1,147 @@
+import asyncio
+import fractions
 import json
-import os
+import time
+import uuid
 
-import opengl_image_process_util as oip
-import OpenImageIO
+import numpy as np
+from aiohttp import web
+from aiohttp_middlewares import cors_middleware
+from aiortc import (
+	MediaStreamTrack,
+	RTCPeerConnection,
+	RTCSessionDescription,
+)
+from av import VideoFrame
 
+from image_process import image_process
 
-def load_image(filename):
-	"""Load an image and return its pixel data and specifications"""
-	in_img = OpenImageIO.ImageInput.open(filename)
-	if not in_img:
-		print(f"Error: Could not open input image: {filename}")
-		return None, None
-
-	spec = in_img.spec()
-	width = spec.width
-	height = spec.height
-	nchannels = spec.nchannels
-	pixel_data = in_img.read_image()
-	in_img.close()
-
-	return pixel_data, spec
+pcs = set()  # Set of active PeerConnections
+project_data = None  # Placeholder for the project data object
 
 
-def get_visible_clips_at_frame(timeline, frame_number, asset_folder="assets"):
-	"""Recursively search timeline to find all clips visible at the given frame"""
-	visible_clips = []
+class ServerVideoTrack(MediaStreamTrack):
+	"""
+	Server video track for streaming frames to clients
+	"""
 
-	if timeline.get("role") == "folder":
-		tracks = timeline.get("tracks", [])
-		start_offset = timeline.get("start", 0)
+	kind = "video"
 
-		for track in tracks:
-			clips = track.get("clips", [])
-			for clip in clips:
-				if clip.get("role") == "folder":
-					# Recursively search folders
-					nested_start = clip.get("start", 0) + start_offset
-					nested_timeline = {"role": "folder", "start": nested_start, "tracks": clip.get("tracks", [])}
-					visible_clips.extend(get_visible_clips_at_frame(nested_timeline, frame_number, asset_folder))
-				elif clip.get("role") == "clip":
-					# Check if this clip is visible at the current frame
-					clip_start = clip.get("start", 0) + start_offset
-					clip_length = clip.get("length", 0)
-					clip_end = clip_start + clip_length
+	def __init__(self, timeline):
+		super().__init__()  # Initialize parent class
+		self._queue = asyncio.Queue(maxsize=1)  # Queue to hold frames (only the latest 1 frame)
+		self.timeline = timeline
 
-					if clip_start <= frame_number < clip_end:
-						source = clip.get("source", "")
-						if source:
-							visible_clips.append(os.path.join(asset_folder, source))
+	async def request_frame(self, frame_index):
+		now = time.time()
 
-	return visible_clips
+		# Get frame data
+		result_pixels, spec = image_process(self.timeline, frame_index)
+
+		# Convert form float32 RGBA to uint8 BGR
+		result_pixels = (np.clip(result_pixels, 0, 1) * 255).astype(np.uint8)
+		result_pixels = result_pixels[:, :, :3]  # Drop the alpha channel
+		result_pixels = result_pixels[:, :, ::-1]  # Convert RGBA to BGR
+
+		# Create a video frame from the numpy array
+		frame = VideoFrame.from_ndarray(result_pixels, format="bgr24")
+		frame.pts = int(now * 1000)
+		frame.time_base = fractions.Fraction(1, 1000)
+
+		# Update the frame index for the next request
+		print(f"Frame {frame_index} requested at {now:.2f}s")
+		if self._queue.full():
+			await self._queue.get()
+		await self._queue.put(frame)
+
+	async def recv(self):
+		frame = await self._queue.get()
+		print(f"Sending frame {frame.pts}")
+		return frame
 
 
-def image_process(timeline, frame_number, asset_folder="assets"):
-	"""Process the timeline and return the rendered frame image for the specified frame number"""
-	# Find all clips visible at the specified frame
-	visible_clip_paths = get_visible_clips_at_frame(timeline, frame_number, asset_folder)
+async def offer(request):
+	"""
+	Handle WebRTC offer from client and return an answer
+	"""
+	try:
+		params = await request.json()
+		offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-	if not visible_clip_paths:
-		print(f"No clips found for frame {frame_number}")
-		return None, None
+		# Create a new peer connection
+		pc = RTCPeerConnection()
+		pc_id = f"PeerConnection({uuid.uuid4()})"
+		pcs.add(pc)
+		print(f"{pc_id} created for {request.remote}")
 
-	print(f"Found {len(visible_clip_paths)} visible clips at frame {frame_number}:")
-	for path in visible_clip_paths:
-		print(f"  - {path}")
+		# Process the offer and set remote description
+		await pc.setRemoteDescription(offer)
 
-	# Load the first image to get dimensions
-	first_image_path = visible_clip_paths[0]
-	result_pixels, spec = load_image(first_image_path)
+		@pc.on("connectionstatechange")
+		async def on_connectionstatechange():
+			print(f"{pc_id} Connection state is {pc.connectionState}")
+			if pc.connectionState == "failed" or pc.connectionState == "closed":
+				await pc.close()
+				pcs.discard(pc)
 
-	if result_pixels is None:
-		print(f"Failed to load first image: {first_image_path}")
-		return None, None
+		@pc.on("iceconnectionstatechange")
+		async def on_iceconnectionstatechange():
+			print(f"{pc_id} ICE Connection state is {pc.iceConnectionState}")
 
-	# Blend all subsequent images
-	for image_path in visible_clip_paths[1:]:
-		image_pixels, _ = load_image(image_path)
-		if image_pixels is not None:
-			# Blend the current result with the new image
-			result_pixels = oip.overlay_images(result_pixels, image_pixels)
-		else:
-			print(f"Failed to load image: {image_path}")
+		@pc.on("icegatheringstatechange")
+		async def on_icegatheringstatechange():
+			print(f"{pc_id} ICE Gathering state is {pc.iceGatheringState}")
 
-	return result_pixels, spec
+		# Add the video track from server to the peer connection
+		timeline = project_data.get("timeline", {})
+		video_track = ServerVideoTrack(timeline=timeline)
+		pc.addTrack(video_track)
+
+		@pc.on("datachannel")
+		async def on_datachannel(channel):
+			@channel.on("message")
+			def on_message(message):
+				if isinstance(message, str):
+					print(f"Message from {pc_id}: {message}")
+					try:
+						frame_number = int(message)
+						asyncio.create_task(video_track.request_frame(frame_number))
+					except ValueError:
+						print(f"Invalid frame index: {message}")
+
+		# Create an answer
+		answer = await pc.createAnswer()
+
+		# Set local description
+		await pc.setLocalDescription(answer)
+
+		# Return the answer with the gathered ICE candidates
+		return web.Response(
+			content_type="application/json",
+			text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
+		)
+
+	except Exception as e:
+		print(f"Error handling offer: {e}")
+		return web.Response(status=500, text=str(e))
+
+
+async def on_shutdown(app):
+	"""Close all peer connections when server shuts down"""
+	print("Shutting down WebRTC connections")
+	coros = [pc.close() for pc in pcs]
+	await web.asyncio.gather(*coros)
+	pcs.clear()
 
 
 def main():
-	input_frame_number = 22
-	project_filename = "assets/project.json"
-	output_filename = f"outputs/frame_{input_frame_number:04d}.png"
+	# ---------
+	# For project
+	# ---------
 
-	# Create outputs directory if it doesn't exist
-	os.makedirs("outputs", exist_ok=True)
+	global project_data
+
+	project_filename = "assets/project.json"
 
 	# Load the project file
 	try:
@@ -101,31 +151,26 @@ def main():
 		print(f"Error loading project file: {e}")
 		return
 
-	# Get the timeline from the project
-	timeline = project_data.get("timeline", {})
+	# -----------
+	# For WebRTC
+	# -----------
+	app = web.Application(
+		middlewares=[
+			cors_middleware(
+				allow_all=True,
+				allow_headers="*",
+				allow_methods="*",
+			)
+		]
+	)
+	app.router.add_post("/offer", offer)
 
-	# Process the frame
-	result_pixels, spec = image_process(timeline, input_frame_number)
+	# Register shutdown handler
+	app.on_shutdown.append(on_shutdown)
 
-	if result_pixels is None or spec is None:
-		print(f"Failed to process frame {input_frame_number}")
-		return
-
-	# Write the output image
-	width = spec.width
-	height = spec.height
-	nchannels = spec.nchannels
-
-	# Modify spec for output
-	new_spec = OpenImageIO.ImageSpec(width, height, nchannels, "uint8")
-
-	# Write the output image using OpenImageIO
-	out_img = OpenImageIO.ImageOutput.create(output_filename)
-	out_img.open(output_filename, new_spec)
-	out_img.write_image(result_pixels)
-	out_img.close()
-
-	print(f"Rendered frame {input_frame_number} to {output_filename}")
+	# Run the server
+	print("Starting WebRTC server at http://localhost:41395")
+	web.run_app(app=app, host="localhost", port=41395)
 
 
 if __name__ == "__main__":
