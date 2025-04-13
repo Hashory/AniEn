@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:multi_split_view/multi_split_view.dart';
 import 'theme.dart';
-import 'timeline.dart';
+import 'timeline/timeline.dart';
 import 'videoplayer.dart';
 import 'node.dart';
-import 'timeline_structure_json.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 void main() {
-  runApp(const AniEnUI());
+  runApp(ProviderScope(child: const AniEnUI()));
 }
 
 class AniEnUI extends StatelessWidget {
@@ -51,11 +51,7 @@ class AniEnRoot extends StatelessWidget {
                     ],
                   ),
             ),
-            Area(
-              builder:
-                  (context, area) =>
-                      TimelineSection(timelineData: timelineStructureJson()),
-            ),
+            Area(builder: (context, area) => TimelineSection()),
           ],
         ),
       ),
