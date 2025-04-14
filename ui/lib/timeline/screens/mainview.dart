@@ -76,8 +76,8 @@ class _MainViewState extends ConsumerState<MainView> {
           child: SizedBox(
             width: totalWidth,
             height:
-                timelineData.data.strips.length *
-                (30 + 4), // Each track 34px + margin
+                timelineData.data.strips.length * (30 + 4) +
+                2, // Each track 34px + margin
             child: FolderView(folder: timelineData.data),
           ),
         ),
@@ -97,6 +97,7 @@ class FolderView extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       spacing: 4,
       children: [
+        SizedBox(height: 2),
         // Conditionally render folder header
         if (folder.name != "Root")
           Container(
@@ -119,6 +120,7 @@ class FolderView extends ConsumerWidget {
           return Container(
             height: 30,
             color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            padding: const EdgeInsets.only(top: 2),
             child: Stack(
               children: [
                 ...trackStrips.map(
